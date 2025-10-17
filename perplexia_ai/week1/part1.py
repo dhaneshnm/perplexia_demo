@@ -18,10 +18,21 @@ import os
 class State(TypedDict):
     """State for the query understanding graph."""
     question: str
+    chat_history: Optional[List[Dict[str, str]]]
     category: Optional[str]
     response: str
 
 class QueryUnderstandingChat(ChatInterface):
+    def _format_chat_history(self, chat_history: Optional[List[Dict[str, str]]]) -> str:
+        """Format chat history for prompt context."""
+        if not chat_history:
+            return ""
+        history_str = ""
+        for turn in chat_history:
+            role = turn.get('role', 'user')
+            content = turn.get('content', '')
+            history_str += f"{role.capitalize()}: {content}\n"
+        return history_str
     """Week 1 Part 1 implementation focusing on query understanding using LangGraph."""
     
     def __init__(self):
@@ -110,24 +121,27 @@ class QueryUnderstandingChat(ChatInterface):
 
 
     def _ask_factual_question(self, state: State) -> State:
+        history_str = self._format_chat_history(state.get("chat_history"))
         prompt = PromptTemplate.from_template(
-            "Answer the following factual question concisely and accurately.\n"
+            "{history}Answer the following factual question concisely and accurately.\n"
             "Example: Q: What is the capital of France?\nA: Paris.\n"
             "Question: {question}\nA:"
-        ).invoke({"question": state["question"]})
+        ).invoke({"question": state["question"], "history": history_str})
         response = self.llm.invoke(prompt)
         return { **state, "response": response.content }
     def _ask_analytical_question(self, state: State) -> State:
+        history_str = self._format_chat_history(state.get("chat_history"))
         prompt = PromptTemplate.from_template(
-            "Provide a thoughtful and well-reasoned answer to the following analytical question.\n"
+            "{history}Provide a thoughtful and well-reasoned answer to the following analytical question.\n"
             "Example: Q: Why did the Roman Empire fall?\nA: The Roman Empire fell due to a combination of internal weaknesses, economic troubles, and external invasions.\n"
             "Question: {question}\nA:"
-        ).invoke({"question": state["question"]})
+        ).invoke({"question": state["question"], "history": history_str})
         response = self.llm.invoke(prompt)
         return { **state, "response": response.content }
     def _ask_comparison_question(self, state: State) -> State:
+        history_str = self._format_chat_history(state.get("chat_history"))
         prompt = PromptTemplate.from_template(
-            "Compare the items or concepts in the following question, highlighting similarities and differences. Present your answer in a markdown table for clarity.\n"
+            "{history}Compare the items or concepts in the following question, highlighting similarities and differences. Present your answer in a markdown table for clarity.\n"
             "Example: Q: How does Python differ from Java?\n"
             "A: | Feature         | Python                        | Java                          |\n"
             "|------------------|-------------------------------|-------------------------------|\n"
@@ -137,15 +151,16 @@ class QueryUnderstandingChat(ChatInterface):
             "| Use Cases        | Rapid prototyping, scripting  | Enterprise applications        |\n"
             "| Popularity       | Widely used in data science   | Widely used in large systems  |\n"
             "Question: {question}\nA:"
-        ).invoke({"question": state["question"]})
+        ).invoke({"question": state["question"], "history": history_str})
         response = self.llm.invoke(prompt)
         return { **state, "response": response.content }
     def _ask_definition_question(self, state: State) -> State:
+        history_str = self._format_chat_history(state.get("chat_history"))
         prompt = PromptTemplate.from_template(
-            "Provide a clear and concise definition for the following term or concept.\n"
+            "{history}Provide a clear and concise definition for the following term or concept.\n"
             "Example: Q: What is photosynthesis?\nA: Photosynthesis is the process by which green plants convert sunlight into chemical energy.\n"
             "Question: {question}\nA:"
-        ).invoke({"question": state["question"]})
+        ).invoke({"question": state["question"], "history": history_str})
         response = self.llm.invoke(prompt)
         return { **state, "response": response.content }
     def process_message(self, message: str, chat_history: Optional[List[Dict[str, str]]] = None) -> str:
@@ -166,6 +181,7 @@ class QueryUnderstandingChat(ChatInterface):
         # TODO: Students implement query understanding using LangGraph
         initial_state = State(
             question=message,
+            chat_history=chat_history,
             category=None,
             response=""
         )
