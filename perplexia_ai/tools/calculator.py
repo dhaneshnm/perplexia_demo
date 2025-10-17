@@ -15,10 +15,6 @@ class Calculator:
         Args:
             expression: A string containing a mathematical expression
                        e.g. "5 + 3" or "10 * (2 + 3)"
-            
-        Returns:
-            Union[float, str]: The result of the evaluation, or an error message
-                              if the expression is invalid
         
         Examples:
             >>> Calculator.evaluate_expression("5 + 3")
