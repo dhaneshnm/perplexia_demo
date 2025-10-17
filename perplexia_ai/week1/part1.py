@@ -13,6 +13,7 @@ from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
 from perplexia_ai.core.chat_interface import ChatInterface
 from perplexia_ai.tools.calculator import Calculator
+from perplexia_ai.tools.datetime_tool import DateTimeTool
 import os
 
 class State(TypedDict):
@@ -52,8 +53,9 @@ class QueryUnderstandingChat(ChatInterface):
             temperature=0.0,
             api_key=api_key
         )
-
-        self.llm.bind_tools([Calculator.evaluate_expression])
+        self.calculator = Calculator()
+        self.datetimetool = DateTimeTool()
+        self.llm.bind_tools([self.calculator.evaluate_expression, self.datetimetool.answer_datetime]) 
         self.graph = self._build_graph()
 
     def _build_graph(self) -> StateGraph:
@@ -92,15 +94,20 @@ class QueryUnderstandingChat(ChatInterface):
         workflow.add_edge("ask_datetime_question", END)
         return workflow.compile()
     def _ask_calculation_question(self, state: State) -> State:
-        calculator_template = PromptTemplate.from_template("Answer this quetion using calculator tool: {question}")
+        calculator_template = PromptTemplate.from_template("Answer this question using calculator tool: {question}")
         prompt = calculator_template.invoke({"question" : state["question"]})
         response = self.llm.invoke(prompt)
         return { **state, "response": response.content }
     def _ask_datetime_question(self, state: State) -> State:
-        from perplexia_ai.tools.datetime_tool import DateTimeTool
-        # Use DateTimeTool to answer the question
-        answer = DateTimeTool.answer_datetime(state["question"])
-        return { **state, "response": answer }
+        # Use the DateTimeTool directly to get the current date, then pass that
+        # information to the LLM so it can answer based on the actual date.
+        current_date = self.datetimetool.answer_datetime()
+        datetime_template = PromptTemplate.from_template(
+            "The current date is: {current_date}. Based on this date, answer the question: {question}"
+        )
+        prompt = datetime_template.invoke({"question": state["question"], "current_date": current_date})
+        response = self.llm.invoke(prompt)
+        return { **state, "response": response.content }
     
     def classifier(self, state: State) -> State:
         classifier_template = PromptTemplate.from_template(
