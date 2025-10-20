@@ -6,25 +6,234 @@ This implementation focuses on:
 - Use conversation history in responses
 """
 
-from typing import Dict, List, Optional, TypedDict
-import os
-import datetime
-from langgraph.graph import StateGraph, START, END
-from langchain_openai import ChatOpenAI
+import contextlib
+import io
+from typing import Dict, List, Optional, TypedDict, Literal
+from langchain_core.prompts import ChatPromptTemplate
+from langchain_core.output_parsers import StrOutputParser
+from langchain_core.tools import tool
+from langchain.chat_models import init_chat_model
+from langgraph.graph import StateGraph, END
 
 from perplexia_ai.core.chat_interface import ChatInterface
 from perplexia_ai.tools.calculator import Calculator
 
+# Classifier prompt with history support
+CLASSIFIER_PROMPT = ChatPromptTemplate.from_template("""
+Classify the given user question into one of the specified categories based on its nature, including all defined categories.
 
-class State(TypedDict):
+- Factual Questions: Questions starting with phrases like "What is...?" or "Who invented...?" should be classified as 'factual'.
+- Analytical Questions: Questions starting with phrases like "How does...?" or "Why do...?" should be classified as 'analytical'.
+- Comparison Questions: Questions starting with phrases like "What's the difference between...?" should be classified as 'comparison'.
+- Definition Requests: Questions starting with phrases like "Define..." or "Explain..." should be classified as 'definition'.
+- Datetime Questions: Questions related to date or time computation should be classified as 'datetime'.
+- Calculation Questions: Questions requiring mathematical computation, not associated with date or time, should be classified as 'calculation'.
+
+If the question does not fit into any of these categories, return 'default'.
+
+# Steps
+
+1. Analyze the user question.
+2. Determine which category the question fits into based on its structure and keywords.
+3. Return the corresponding category or 'default' if none apply.
+
+# Output Format
+
+- Return only the category word: 'factual', 'analytical', 'comparison', 'definition', 'datetime', 'calculation', or 'default'.
+- Do not include any extra text or quotes in the output.
+
+# Examples
+
+- **Example 1**  
+  * Question: What is the highest mountain in the world?  
+  * Response: factual
+
+- **Example 2**  
+  * Question: What's the difference between OpenAI and Anthropic?  
+  * Response: comparison
+
+- **Example 3**  
+  * Question: What's an 18% tip of a $105 bill?  
+  * Response: calculation
+
+- **Example 4**  
+  * Question: What day is it today?  
+  * Response: datetime
+
+Use information from the conversation history only if relevant to the above user query, otherwise ignore the history.
+Conversation history with the user:
+{history}
+
+User question: {question}
+
+""")
+
+# Response prompts for each category (all with history support)
+RESPONSE_PROMPTS = {
+    "factual": ChatPromptTemplate.from_template(
+        """
+        Answer the following question concisely with a direct fact. Avoid unnecessary details.
+
+        Use information from the conversation history only if relevant to the above user query, otherwise ignore the history.
+        Conversation history with the user:
+        {history}
+
+        User question: "{question}"
+        Answer:
+        """
+    ),
+    "analytical": ChatPromptTemplate.from_template(
+        """
+        Provide a detailed explanation with reasoning for the following question. Break down the response into logical steps.
+
+        Use information from the conversation history only if relevant to the above user query, otherwise ignore the history.
+        Conversation history with the user:
+        {history}
+
+        User question: "{question}"
+        Explanation:
+        """
+    ),
+    "comparison": ChatPromptTemplate.from_template(
+        """
+        Compare the following concepts. Present the answer in a structured format using bullet points or a table for clarity.
+
+        Use information from the conversation history only if relevant to the above user query, otherwise ignore the history.
+        Conversation history with the user:
+        {history}
+
+        User question: "{question}"
+        Comparison:
+        """
+    ),
+    "definition": ChatPromptTemplate.from_template(
+        """
+        Define the following term and provide relevant examples and use cases for better understanding.
+
+        Use information from the conversation history only if relevant to the above user query, otherwise ignore the history.
+        Conversation history with the user:
+        {history}
+
+        User question: "{question}"
+        Definition:
+        Examples:
+        Use Cases:
+        """
+    ),
+    "calculation": ChatPromptTemplate.from_template(
+        """
+        You are a smart AI model but cannot do any complex calculations. You are very good at
+        translating a math question to a simple equation which can be solved by a calculator.
+
+        Convert the user question below to a math calculation.
+        Remember that the calculator can only use +, -, *, /, //, % operators,
+        so only use those operators and output the final math equation.
+
+        Examples:
+        Question: What is 5 times 20?
+        Answer: 5 * 20
+
+        Question: What is the split of each person for a 4 person dinner of $100 with 20% tip?
+        Answer: (100 + 0.2*100) / 4
+
+        Question: Round 100.5 to the nearest integer.
+        Answer: 100.5 // 1
+
+        Use information from the conversation history only if relevant to the above user query, otherwise ignore the history.
+        Conversation history with the user:
+        {history}
+
+        User Query: "{question}"
+
+        The final output should ONLY contain the valid math equation, no words or any other text.
+        Otherwise the calculator tool will error out.
+        """
+    ),
+    "datetime": ChatPromptTemplate.from_template(
+        """You are a smart AI which is very good at translating a question in english
+        to a simple python code to output the result. You'll only be given queries related
+        to date and time, for which generate the python code required to get the answer.
+        Your code will be sent to a Python interpreter and the expectation is to print the output on the final line.
+
+        These are the ONLY python libraries you have access to - math, datetime, time.
+
+        Examples:
+        Question: What day is it today?
+        Answer: print(datetime.now().strftime("%A"))
+
+        Question: What is the date of 30 days from now?
+        Answer: print(datetime.now() + timedelta(days=30))
+
+        Use information from the conversation history only if relevant to the above user query, otherwise ignore the history.
+        Conversation history with the user:
+        {history}
+
+        User Query: "{question}"
+
+        The final output should ONLY contain valid Python code, no words or any other text.
+        Otherwise the Python interpreter tool will error out. Avoid returning ``` or python
+        in the output, just return the code directly.
+        """
+    ),
+    "default": ChatPromptTemplate.from_template(
+        """
+        Respond your best to answer the following question but keep it very brief.
+
+        Use information from the conversation history only if relevant to the above user query, otherwise ignore the history.
+        Conversation history with the user:
+        {history}
+
+        User question: "{question}"
+        Answer:
+        """
+    )
+}
+
+# Tool decorators for calculator and datetime
+@tool
+def calculator_tool(expression: str) -> str:
+    """Evaluate a math expression and return the result as a string.
+
+    Supports only basic arithmetic operations (+, -, *, /, //, %) and parentheses.
+
+    Args:
+        expression: The math expression to evaluate.
+
+    Returns:
+        The result of the math expression as a string formatted as "The answer is: {result}"
+    """
+    print(f"Evaluating expression: {expression}")
+    result = str(Calculator.evaluate_expression(expression))
+    return f"The answer is: {result}"
+
+@tool
+def datetime_tool(code: str) -> str:
+    """Execute Python code to answer date or time related questions.
+    
+    NOTE: We are using exec here to execute the code, which is not a good practice for production
+    as this can lead to security vulnerabilities. For the purpose of the assignment, we are assuming
+    the model will only return valid and safe python code.
+
+    Args:
+        code: The python code to execute.
+
+    Returns:
+        The output of the python code as a string.
+    """
+    print(f"Executing code: {code}")
+    output_buffer = io.StringIO()
+    code = f"import datetime\nimport time\nfrom datetime import timedelta\n{code}"
+    with contextlib.redirect_stdout(output_buffer):
+        exec(code)
+    return output_buffer.getvalue().strip()
+
+# State definition for the graph
+class MemoryState(TypedDict):
     """State for the memory-enabled chat graph."""
     question: str
-    history: Optional[str]
-    category: Optional[str]
-    calculation_expression: Optional[str]
-    calculation_result: Optional[str]
+    history: str
+    category: str
     response: str
-
 
 class MemoryChat(ChatInterface):
     """Week 1 Part 3 implementation adding conversation memory using LangGraph."""
@@ -32,228 +241,162 @@ class MemoryChat(ChatInterface):
     def __init__(self):
         """Initialize components for memory-enabled chat using LangGraph.
         
+        Students should:
         - Initialize the chat model
         - Build a graph with classifier, response, and tool nodes
         - Include history in prompts for context-aware responses
         - Set up conditional edges for routing
         - Compile the graph
         """
-        # Initialize the language model
-        api_key = os.getenv("OPENAI_API_KEY")
-        if not api_key:
-            raise ValueError("OPENAI_API_KEY environment variable is required")
+        # Initialize the LLM
+        self.llm = init_chat_model("gpt-5-mini", model_provider="openai", reasoning_effort='minimal')
         
-        self.llm = ChatOpenAI(
-            model="gpt-3.5-turbo",
-            temperature=0.7,
-            api_key=api_key
-        )
-        
-        self.calculator = Calculator()
-        
-        # Build and compile the graph
-        self.graph = self._build_graph()
+        # Build the graph
+        self.graph = None
+        self._build_graph()
     
-    def _build_graph(self) -> StateGraph:
-        """Build the LangGraph workflow for memory-enabled chat."""
+    def _build_graph(self) -> None:
+        """Build the LangGraph with memory support."""
         # Create the graph
-        workflow = StateGraph(State)
+        workflow = StateGraph(MemoryState)
         
-        # Add nodes
+        # Add classifier node
         workflow.add_node("classifier", self._classify_query)
-        workflow.add_node("calculator_tool", self._use_calculator)
-        workflow.add_node("datetime_tool", self._get_datetime)
-        workflow.add_node("general_response", self._handle_general)
-        workflow.add_node("greeting_response", self._handle_greeting)
-        workflow.add_node("question_response", self._handle_question)
         
-        # Add edges
-        workflow.add_edge(START, "classifier")
+        # Add response nodes for all categories
+        workflow.add_node("factual_response", self._factual_response)
+        workflow.add_node("analytical_response", self._analytical_response)
+        workflow.add_node("comparison_response", self._comparison_response)
+        workflow.add_node("definition_response", self._definition_response)
+        workflow.add_node("calculation_response", self._calculation_response)
+        workflow.add_node("datetime_response", self._datetime_response)
+        workflow.add_node("default_response", self._default_response)
         
-        # Add conditional edges based on classification
+        # Set entry point
+        workflow.set_entry_point("classifier")
+        
+        # Add conditional edges from classifier
         workflow.add_conditional_edges(
             "classifier",
             self._route_query,
             {
-                "greeting": "greeting_response",
-                "calculation": "calculator_tool",
-                "datetime": "datetime_tool",
-                "question": "question_response", 
-                "general": "general_response"
+                "factual": "factual_response",
+                "analytical": "analytical_response",
+                "comparison": "comparison_response",
+                "definition": "definition_response",
+                "calculation": "calculation_response",
+                "datetime": "datetime_response",
+                "default": "default_response"
             }
         )
         
-        # All response nodes lead to END
-        workflow.add_edge("general_response", END)
-        workflow.add_edge("greeting_response", END)
-        workflow.add_edge("question_response", END)
-        workflow.add_edge("calculator_tool", END)
-        workflow.add_edge("datetime_tool", END)
+        # Add edges from response nodes to END
+        workflow.add_edge("factual_response", END)
+        workflow.add_edge("analytical_response", END)
+        workflow.add_edge("comparison_response", END)
+        workflow.add_edge("definition_response", END)
+        workflow.add_edge("calculation_response", END)
+        workflow.add_edge("datetime_response", END)
+        workflow.add_edge("default_response", END)
         
-        return workflow.compile()
+        # Compile the graph
+        self.graph = workflow.compile()
     
-    def _format_chat_history(self, chat_history: Optional[List[Dict[str, str]]]) -> str:
-        """Format chat history as a string for context."""
-        if not chat_history:
-            return "No previous conversation history."
+    def _classify_query(self, state: MemoryState) -> MemoryState:
+        """Classify the query into a category using history."""
+        classifier_chain = CLASSIFIER_PROMPT | self.llm | StrOutputParser()
+        category = classifier_chain.invoke({
+            "question": state["question"],
+            "history": state["history"]
+        }).strip().lower()
         
-        formatted_history = []
-        for message in chat_history[-10:]:  # Keep last 10 messages
-            role = message.get("role", "unknown")
-            content = message.get("content", "")
-            formatted_history.append(f"{role.capitalize()}: {content}")
+        # Ensure category is valid
+        valid_categories = ["factual", "analytical", "comparison", "definition", "calculation", "datetime", "default"]
+        if category not in valid_categories:
+            category = "default"
         
-        return "\n".join(formatted_history)
-    
-    def _classify_query(self, state: State) -> State:
-        """Classify the user query into categories with memory context."""
-        question = state["question"]
-        history = state.get("history", "No previous conversation history.")
-        
-        classification_prompt = f"""
-        Based on the conversation history and current question, classify the user input into one of these categories:
-        - "greeting": Simple hellos, hi, how are you, etc.
-        - "calculation": Mathematical expressions or calculation requests (e.g., "what is 5 + 3", "calculate 10 * 2")
-        - "datetime": Requests for current time or date
-        - "question": Specific questions seeking information or explanations
-        - "general": General conversation, statements, or anything else
-        
-        Conversation history:
-        {history}
-        
-        Current user input: "{question}"
-        
-        Respond with only the category name (greeting, calculation, datetime, question, or general).
-        """
-        
-        response = self.llm.invoke(classification_prompt)
-        category = response.content.strip().lower()
-        
-        # Ensure we have a valid category
-        if category not in ["greeting", "calculation", "datetime", "question", "general"]:
-            category = "general"
-        
-        return {**state, "category": category}
-    
-    def _route_query(self, state: State) -> str:
-        """Route to appropriate handler based on category."""
-        return state["category"]
-    
-    def _use_calculator(self, state: State) -> State:
-        """Use calculator tool for mathematical operations with memory context."""
-        question = state["question"]
-        history = state.get("history", "")
-        
-        # Extract mathematical expression with context
-        extraction_prompt = f"""
-        Given the conversation history and current user input, extract the mathematical expression 
-        that needs to be calculated. Consider any previous calculations or context.
-        
-        Conversation history:
-        {history}
-        
-        Current user input: "{question}"
-        
-        Return only the mathematical expression that can be calculated (e.g., "5 + 3", "10 * (2 + 3)", "15 / 3").
-        If the user is referring to a previous calculation, use the context to understand what they mean.
-        
-        Mathematical expression:
-        """
-        
-        response = self.llm.invoke(extraction_prompt)
-        expression = response.content.strip()
-        
-        # Calculate the result
-        result = self.calculator.evaluate_expression(expression)
-        
-        # Format the response with context awareness
-        if isinstance(result, str) and result.startswith("Error"):
-            final_response = f"I apologize, but I encountered an error while calculating: {result}"
-        else:
-            # Check if this seems like a follow-up calculation
-            if any(word in question.lower() for word in ["that", "it", "result", "answer", "plus", "minus", "times", "divided"]):
-                final_response = f"Based on our conversation, calculating {expression} = {result}"
-            else:
-                final_response = f"The answer is: {expression} = {result}"
+        print(f"Question: {state['question']}, Category: {category}")
         
         return {
-            **state, 
-            "calculation_expression": expression,
-            "calculation_result": str(result),
-            "response": final_response
+            **state,
+            "category": category
         }
     
-    def _get_datetime(self, state: State) -> State:
-        """Get current date and time with memory context."""
-        history = state.get("history", "")
-        now = datetime.datetime.now()
-        current_time = now.strftime("%Y-%m-%d %H:%M:%S")
-        
-        # Check if this is a follow-up to previous time requests
-        if "time" in history.lower() or "date" in history.lower():
-            response = f"The current date and time is now: {current_time}"
-        else:
-            response = f"The current date and time is: {current_time}"
-            
+    def _route_query(self, state: MemoryState) -> Literal["factual", "analytical", "comparison", "definition", "calculation", "datetime", "default"]:
+        """Route to the appropriate node based on category."""
+        return state["category"]
+    
+    def _factual_response(self, state: MemoryState) -> MemoryState:
+        """Generate factual response with history."""
+        chain = RESPONSE_PROMPTS["factual"] | self.llm | StrOutputParser()
+        response = chain.invoke({
+            "question": state["question"],
+            "history": state["history"]
+        })
         return {**state, "response": response}
     
-    def _handle_greeting(self, state: State) -> State:
-        """Handle greeting messages with memory context."""
-        history = state.get("history", "")
-        
-        # Check if we've greeted before
-        if "hello" in history.lower() or "hi" in history.lower():
-            response = "Hello again! How else can I help you today?"
-        else:
-            response = "Hello! I'm your AI assistant. I can help with calculations, tell you the current time, and answer questions while remembering our conversation. How can I help you today?"
-            
+    def _analytical_response(self, state: MemoryState) -> MemoryState:
+        """Generate analytical response with history."""
+        chain = RESPONSE_PROMPTS["analytical"] | self.llm | StrOutputParser()
+        response = chain.invoke({
+            "question": state["question"],
+            "history": state["history"]
+        })
         return {**state, "response": response}
     
-    def _handle_question(self, state: State) -> State:
-        """Handle specific questions with memory context."""
-        question = state["question"]
-        history = state.get("history", "")
-        
-        response_prompt = f"""
-        The user has asked a specific question. Use the conversation history to provide context-aware, 
-        helpful, and professional response. If the question relates to something discussed earlier, 
-        acknowledge that connection.
-        
-        Conversation history:
-        {history}
-        
-        Current question: {question}
-        
-        Provide your response:
-        """
-        
-        response = self.llm.invoke(response_prompt)
-        return {**state, "response": response.content}
+    def _comparison_response(self, state: MemoryState) -> MemoryState:
+        """Generate comparison response with history."""
+        chain = RESPONSE_PROMPTS["comparison"] | self.llm | StrOutputParser()
+        response = chain.invoke({
+            "question": state["question"],
+            "history": state["history"]
+        })
+        return {**state, "response": response}
     
-    def _handle_general(self, state: State) -> State:
-        """Handle general conversation with memory context."""
-        message = state["question"]
-        history = state.get("history", "")
+    def _definition_response(self, state: MemoryState) -> MemoryState:
+        """Generate definition response with history."""
+        chain = RESPONSE_PROMPTS["definition"] | self.llm | StrOutputParser()
+        response = chain.invoke({
+            "question": state["question"],
+            "history": state["history"]
+        })
+        return {**state, "response": response}
+    
+    def _default_response(self, state: MemoryState) -> MemoryState:
+        """Generate default response with history."""
+        chain = RESPONSE_PROMPTS["default"] | self.llm | StrOutputParser()
+        response = chain.invoke({
+            "question": state["question"],
+            "history": state["history"]
+        })
+        return {**state, "response": response}
+    
+    def _calculation_response(self, state: MemoryState) -> MemoryState:
+        """Generate math expression and execute calculator using chained tools with history."""
+        # Chain: LLM generates expression -> StrOutputParser -> calculator_tool executes it
+        chain = RESPONSE_PROMPTS["calculation"] | self.llm | StrOutputParser() | calculator_tool
+        response = chain.invoke({
+            "question": state["question"],
+            "history": state["history"]
+        })
         
-        response_prompt = f"""
-        The user has made a general statement or comment. Use the conversation history to respond 
-        in a friendly, conversational way that acknowledges previous interactions and keeps the 
-        dialogue going naturally.
+        return {**state, "response": response}
+    
+    def _datetime_response(self, state: MemoryState) -> MemoryState:
+        """Generate Python code and execute it using chained tools with history."""
+        # Chain: LLM generates code -> StrOutputParser -> datetime_tool executes it
+        chain = RESPONSE_PROMPTS["datetime"] | self.llm | StrOutputParser() | datetime_tool
+        response = chain.invoke({
+            "question": state["question"],
+            "history": state["history"]
+        })
         
-        Conversation history:
-        {history}
-        
-        Current user message: {message}
-        
-        Provide your response:
-        """
-        
-        response = self.llm.invoke(response_prompt)
-        return {**state, "response": response.content}
+        return {**state, "response": response}
     
     def process_message(self, message: str, chat_history: Optional[List[Dict[str, str]]] = None) -> str:
         """Process a message with memory and tools using LangGraph.
         
+        Students should:
         - Format chat_history as a string
         - Initialize state with question and history
         - Invoke the graph
@@ -266,20 +409,21 @@ class MemoryChat(ChatInterface):
         Returns:
             str: The assistant's response
         """
-        # Format chat history
-        formatted_history = self._format_chat_history(chat_history)
+        # Format chat history as a string
+        if chat_history:
+            history = "\n".join([f"{msg['role']}: {msg['content']}" for msg in chat_history])
+        else:
+            history = ""
         
         # Initialize state
-        initial_state = State(
-            question=message,
-            history=formatted_history,
-            category=None,
-            calculation_expression=None,
-            calculation_result=None,
-            response=""
-        )
+        initial_state = {
+            "question": message,
+            "history": history,
+            "category": "",
+            "response": ""
+        }
         
-        # Invoke the graph
+        # Run the graph
         result = self.graph.invoke(initial_state)
         
         # Return the response

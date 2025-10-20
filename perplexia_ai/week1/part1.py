@@ -97,9 +97,9 @@ class QueryUnderstandingChat(ChatInterface):
         response = self.llm.invoke(prompt)
         return { **state, "response": response.content }
     def _ask_datetime_question(self, state: State) -> State:
-        from perplexia_ai.tools.datetime_tool import DateTimeTool
+        from perplexia_ai.tools.date_time import DateTime
         # Use DateTimeTool to answer the question
-        answer = DateTimeTool.answer_datetime(state["question"])
+        answer = DateTime.get_current_date(state["question"])
         return { **state, "response": answer }
     
     def classifier(self, state: State) -> State:
