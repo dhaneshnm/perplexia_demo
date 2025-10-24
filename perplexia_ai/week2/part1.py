@@ -10,14 +10,39 @@ This implementation focuses on:
 
 from typing import Dict, List, Optional
 from perplexia_ai.core.chat_interface import ChatInterface
+from langchain_openai import ChatOpenAI
+from langchain_core.prompts import PromptTemplate
+from tavily import TavilyClient
+from langchain_openai import ChatOpenAI
+from langgraph.graph import StateGraph, START, END
+from opik import configure 
+from opik.integrations.langchain import OpikTracer 
+
+import os
+
+def search_tool(query: str) -> str:
+    tavily_api_key = os.getenv("TAVILY_API_KEY")
+    tavily_client = TavilyClient(api_key=tavily_api_key)
+    response = tavily_client.search(query)
+    return response
 
 
 class WebSearchChat(ChatInterface):
     """Week 2 Part 1 implementation for web search using LangGraph + Tracing."""
     
     def __init__(self):
-        self.llm = None
-        self.search_tool = None
+        opnai_api_key = os.getenv("OPENAI_API_KEY")
+        if not opnai_api_key:
+            raise ValueError("OPENAI_API_KEY environment variable is required")
+        self.tracer = OpikTracer() 
+        self.llm = ChatOpenAI(
+            model='gpt-3.5-turbo',
+            temperature=0.0,
+            api_key=opnai_api_key,
+            callbacks=[self.tracer]
+        )
+        self.llm.bind_tools([search_tool])
+        self.search_tool = search_tool
         self.graph = None
         self.tracer = None
     
