@@ -184,7 +184,11 @@ def create_demo(week: int = 1, mode_str: str = "part1", use_solution: bool = Fal
             str: The assistant's response
         """
         # Get response from our chat implementation
-        return chat_interface.process_message(message, history)
+        result = chat_interface.process_message(message, history)
+        # Backwards-compatible: some implementations return a tuple (response, search_results)
+        if isinstance(result, tuple) or isinstance(result, list):
+            return result[0]
+        return result
     
     # Create the Gradio interface
     demo = gr.ChatInterface(
