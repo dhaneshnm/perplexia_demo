@@ -19,6 +19,7 @@ from opik import configure
 from opik.integrations.langchain import OpikTracer 
 
 import os
+import json
 
 
 
@@ -35,37 +36,10 @@ class WebSearchChat(ChatInterface):
     """Week 2 Part 1 implementation for web search using LangGraph + Tracing."""
     
     def __init__(self):
-        opnai_api_key = os.getenv("OPENAI_API_KEY")
-        if not opnai_api_key:
-          raise ValueError("OPENAI_API_KEY environment variable is required")
-        # self.tracer = OpikTracer() 
-        self.llm = ChatOpenAI(
-            model='gpt-3.5-turbo',
-            temperature=0.0,
-            api_key=opnai_api_key,
-            # callbacks=[self.tracer]
-        )
-        # Read Tavily API key from environment and pass it to the tool.
-        # The Tavily client validates that a key is provided and will raise a
-        # helpful ValidationError if it's missing. We surface a clearer
-        # message here so students know what to set.
-        tavily_api_key = os.getenv("TAVILY_API_KEY")
-        if not tavily_api_key:
-            raise ValueError(
-                "TAVILY_API_KEY environment variable is required for web search;"
-                " please set it or pass `tavily_api_key` when constructing TavilySearch."
-            )
-
-        search_tool = TavilySearch(
-            tavily_api_key=tavily_api_key,
-            max_results=5,
-            topic="general",
-            include_answer=True,
-        )
-        self.llm.bind_tools([search_tool])
-        # keep a direct reference to the tool so we can invoke it from a graph node
-        self.search_tool = search_tool
-        self.graph = self._build_graph()
+        self.llm = None
+        self.search_tool = None
+        self.graph = None
+        self.tracer = None
 
 
     def _ask_question(self, state: State) -> State:
@@ -83,15 +57,19 @@ class WebSearchChat(ChatInterface):
     
     
     def _format_search_results(self, results: List[Any]) -> str:
-        """Format search results with citations for summary generation."""
+        """Format search results with citations for summary generation in JSON format."""
         formatted_results = []
         for i, search_result in enumerate(results, 1):
             if isinstance(search_result, dict) and "results" in search_result:
                 for j, result in enumerate(search_result["results"], 1):
-                    source = f"[{i}.{j}] {result.get('url', 'No URL')}"
-                    content = result.get('content', '')
-                    formatted_results.append(f"Source {source}:\n{content}\n")
-        return "\n".join(formatted_results)
+                    formatted_results.append({
+                        "citation": f"[{i}.{j}]",
+                        "url": result.get('url', 'No URL'),
+                        "content": result.get('content', ''),
+                        "title": result.get('title', ''),
+                        "published_date": result.get('published_date', '')
+                    })
+        return json.dumps({"sources": formatted_results})
 
     def _generate_summary(self, state: State) -> State:
         """Generate a summary from accumulated search results with citations."""
@@ -99,15 +77,17 @@ class WebSearchChat(ChatInterface):
         if not accumulated:
             return state
             
-        formatted_results = self._format_search_results(accumulated)
+        search_data = json.loads(self._format_search_results(accumulated))
         prompt = PromptTemplate.from_template(
-            "You have performed multiple web searches and received several results. "
+            "You have performed multiple web searches and received several results in JSON format. "
+            "Each source has a citation number, URL, and content. "
             "Please synthesize a comprehensive answer based on all findings. "
-            "Include citations to your sources using the provided source numbers in square brackets "
-            "(e.g., [1.1], [2.3], etc.). Each citation should back up the specific claim or information "
-            "you're presenting. Make sure to cite multiple sources where appropriate.\n\n"
-            "Here are the search results with their sources:\n\n{results}"
-        ).invoke({"results": formatted_results})
+            "Include citations to your sources using the citation numbers in square brackets "
+            "(e.g., [1.1], [2.3], etc.). Each citation should back up the specific claim or information. "
+            "List all the sources in numerical order at the end of your response. "
+            "Make sure to cite multiple sources where appropriate.\n\n"
+            "Here are the search results:\n\n{results}"
+        ).invoke({"results": json.dumps(search_data, indent=2)})
         
         summary = self.llm.invoke(prompt)
         return {**state, "response": summary.content}
@@ -172,7 +152,41 @@ class WebSearchChat(ChatInterface):
         - Create a LangGraph workflow for web search
         - Add Opik tracing for observability
         """
-        pass
+        # Initialize OpenAI LLM
+        opnai_api_key = os.getenv("OPENAI_API_KEY")
+        if not opnai_api_key:
+            raise ValueError("OPENAI_API_KEY environment variable is required")
+
+        # Set up Opik tracing
+        # self.tracer = OpikTracer()
+
+        # Initialize LLM with tracer
+        self.llm = ChatOpenAI(
+            model='gpt-3.5-turbo',
+            temperature=0.0,
+            api_key=opnai_api_key,
+            # callbacks=[self.tracer]
+        )
+
+        # Set up Tavily search tool
+        tavily_api_key = os.getenv("TAVILY_API_KEY")
+        if not tavily_api_key:
+            raise ValueError(
+                "TAVILY_API_KEY environment variable is required for web search;"
+                " please set it or pass `tavily_api_key` when constructing TavilySearch."
+            )
+
+        self.search_tool = TavilySearch(
+            tavily_api_key=tavily_api_key,
+            max_results=5,
+            topic="general",
+            include_answer=True,
+            include_raw_content=True
+        )
+        self.llm.bind_tools([self.search_tool])
+
+        # Create LangGraph workflow
+        self.graph = self._build_graph()
     
     def process_message(self, message: str, chat_history: Optional[List[Dict[str, str]]] = None) -> Tuple[str, Optional[Any]]:
         """Process a message using web search and record trace.
