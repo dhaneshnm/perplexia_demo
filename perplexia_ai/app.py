@@ -108,7 +108,7 @@ def create_demo(week: int = 1, mode_str: str = "part1", use_solution: bool = Fal
             examples = [
                 ["What new customer experience improvements did OPM implement for retirement services in FY 2022?"],
                 ["How did OPM's approach to improving the federal hiring process evolve from FY 2019 through FY 2022?"],
-                ["What were the performance metrics for OPM in 2020? Compare them with 2019."],
+                ["What were some key performance metrics for OPM in 2020? Compare them with 2019?"],
                 ["What strategic goals did OPM outline in the 2022 report?"]
             ]
     
@@ -184,11 +184,7 @@ def create_demo(week: int = 1, mode_str: str = "part1", use_solution: bool = Fal
             str: The assistant's response
         """
         # Get response from our chat implementation
-        result = chat_interface.process_message(message, history)
-        # Backwards-compatible: some implementations return a tuple (response, search_results)
-        if isinstance(result, tuple) or isinstance(result, list):
-            return result[0]
-        return result
+        return chat_interface.process_message(message, history)
     
     # Create the Gradio interface
     demo = gr.ChatInterface(
