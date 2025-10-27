@@ -122,6 +122,9 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
+# Vector store database files
+chroma_langchain_db/
+
 # IDE and Editor files
 .vscode/
 .idea/
