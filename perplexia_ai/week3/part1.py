@@ -49,8 +49,7 @@ class ToolUsingAgentChat(ChatInterface):
             raise ValueError("OPENAI_API_KEY environment variable is required")
 
         self.llm = ChatOpenAI(
-            model='gpt-3.5-turbo',
-            temperature=0.0,
+            model='gpt-5-nano',
             api_key=opnai_api_key,
         )
 
