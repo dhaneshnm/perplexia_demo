@@ -13,7 +13,6 @@ from perplexia_ai.core.chat_interface import ChatInterface
 from langchain_openai import ChatOpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain_tavily import TavilySearch
-from langchain_openai import ChatOpenAI
 from langgraph.graph import StateGraph, START, END
 from opik import configure 
 from opik.integrations.langchain import OpikTracer 
