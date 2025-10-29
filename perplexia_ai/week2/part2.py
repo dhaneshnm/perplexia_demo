@@ -12,7 +12,6 @@ This implementatio        # Process and load documents
 """
 import os
 import chromadb
-import json
 from typing import Dict, List, Optional, TypedDict, Any, Tuple
 from perplexia_ai.core.chat_interface import ChatInterface
 from langchain_chroma import Chroma
@@ -66,7 +65,6 @@ class DocumentRAGChat(ChatInterface):
         )
         
         # Initialize vector store with a clean collection
-        import chromadb
         client = chromadb.PersistentClient(path="./chroma_langchain_db")
         
         # Delete the collection if it exists
